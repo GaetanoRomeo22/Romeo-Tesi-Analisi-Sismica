@@ -9,6 +9,7 @@ from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
 import optuna
 from pytorch_forecasting.metrics import QuantileLoss
 import matplotlib.pyplot as plt
+import torch
 
 '''
 wandb.init(project="Romeo_Temporal_Fusion_Transformer")
@@ -51,8 +52,8 @@ if __name__ == '__main__':
     train_cnt = int(len(dataset) * .8)  # 80% train e 20% test
     train = dataset.iloc[:train_cnt] # Dati di train
     test = dataset.iloc[train_cnt:] # Dati di test
-    max_prediction_length = 168 # Numero di osservazioni da predire
-    max_encoder_length = 720 # Numero di osservazioni da analizzare per le predizioni
+    max_prediction_length = 24 # Numero di osservazioni da predire
+    max_encoder_length = 168 # Numero di osservazioni da analizzare per le predizioni
     batch_size = 64
 
     training = TimeSeriesDataSet( # Converto il dataset nel formato richiesto dal TFT
@@ -85,8 +86,8 @@ if __name__ == '__main__':
     def objective(trial): # Funzione per trovare i migliori pesi di addestramento
         hidden_size = trial.suggest_int("hidden_size", 8, 64, step=8)
         hidden_continuous_size = trial.suggest_int("hidden_continuous_size", 8, 64, step=8)
-        dropout = trial.suggest_float("dropout", 0.3, 0.7)
-        learning_rate = trial.suggest_float("learning_rate", 1e-4, 1e-2, log=True)
+        dropout = trial.suggest_categorical("dropout", [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 0.9])
+        learning_rate = trial.suggest_categorical("learning_rate", [0.0001, 0.01, 0.1])
         attention_head_size = trial.suggest_int("attention_head_size", 1, 4)
 
         tft = TemporalFusionTransformer.from_dataset( # Creo il TFT con i migliori pesi
@@ -128,13 +129,13 @@ if __name__ == '__main__':
     study = optuna.create_study(direction="minimize", storage="sqlite:///Romeo_Temporal_Fusion_Transformer.db")
 
     # Optimize the objective function
-    study.optimize(objective, n_trials=3)
+    study.optimize(objective, n_trials=10)
 
     early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=10, verbose=False, mode="min")
     lr_logger = LearningRateMonitor()  # log the learning rate
 
     trainer = pl.Trainer( # Definizione dei parametri di addestramento del TFT
-        max_epochs=50,
+        max_epochs=30,
         accelerator="cpu",
         enable_model_summary=True,
         gradient_clip_val=0.1,
@@ -178,20 +179,18 @@ if __name__ == '__main__':
     predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output)
     best_tft.plot_prediction_actual_by_variable(predictions_vs_actuals)
     plt.show()
-
     '''
     torch.save(best_tft.state_dict(), 'Best_tft_model.pth') # Salvataggio del miglior modello
 
     new_tft = TemporalFusionTransformer.from_dataset( # Definizione del TFT
         training,
-        learning_rate=0.004,
+        learning_rate=0.01,
         hidden_size=5,
         attention_head_size=2,
         hidden_continuous_size=1,
         loss=QuantileLoss(),
-        log_interval=10,  # uncomment for learning rate finder and otherwise, e.g. to 10 for logging every 10 batches
-        optimizer="AdamW",
-        reduce_on_plateau_patience=1,
+        optimizer="Ranger",
+        reduce_on_plateau_patience=5,
         lstm_layers=3,
         dropout=0.5
     )
