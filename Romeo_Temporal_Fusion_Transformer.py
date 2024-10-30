@@ -7,9 +7,9 @@ from pytorch_forecasting.data import GroupNormalizer
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
 import optuna
-from pytorch_forecasting.metrics import QuantileLoss
+from pytorch_forecasting.metrics import QuantileLoss, MAE, RMSE
 import matplotlib.pyplot as plt
-import torch
+from lightning.pytorch.tuner import Tuner
 
 '''
 wandb.init(project="Romeo_Temporal_Fusion_Transformer")
@@ -39,7 +39,7 @@ def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl 
 
 if __name__ == '__main__':
     # Caricamento e settaggio del dataset
-    # rtl_to_csv("SOLO-LICO", "Dataset.csv") # Converto i file rtl in csv
+    rtl_to_csv("SOLO-LICO", "Dataset.csv") # Converto i file rtl in csv
     dataset = pd.read_csv("Dataset.csv")  # Creo un dataframe con pandas
     dataset = dataset.dropna()  # Rimuovo i campi NULL
     dataset['date'] = pd.to_datetime(dataset['date'], format='%d-%m-%Y') # Converto la data nel formato corretto
@@ -54,6 +54,7 @@ if __name__ == '__main__':
     max_prediction_length = 24 # Numero di osservazioni da predire
     max_encoder_length = 168 # Numero di osservazioni da analizzare per le predizioni
     batch_size = 64
+    epochs = 30
 
     training = TimeSeriesDataSet( # Converto il dataset nel formato richiesto dal TFT
         train, # Dati di addestramento
@@ -82,16 +83,42 @@ if __name__ == '__main__':
     train_dataloader = training.to_dataloader(train=True, batch_size=batch_size, num_workers=8, persistent_workers=True)
     val_dataloader = validation.to_dataloader(train=False, batch_size=batch_size * 10, num_workers=8, persistent_workers=True)
 
+    # Fase di ricerca del miglior learning rate con Tuner
+    pl.seed_everything(42)
+    trainer = pl.Trainer(
+        accelerator="cpu",
+        max_epochs=epochs,
+        gradient_clip_val=0.1
+    )
+    tft = TemporalFusionTransformer.from_dataset(
+        training,
+        learning_rate=0.03,
+        hidden_size=8,
+        attention_head_size=1,
+        dropout=0.1,
+        hidden_continuous_size=8,
+        loss=QuantileLoss(),
+        optimizer="Ranger"
+    )
+    res = Tuner(trainer).lr_find(
+        tft,
+        train_dataloaders=train_dataloader,
+        val_dataloaders=val_dataloader,
+        max_lr=0.01,
+        min_lr=0.0001
+    )
+    fig = res.plot(show=True, suggest=True)
+    fig.show()
+
     def objective(trial): # Funzione per trovare i migliori pesi di addestramento
         hidden_size = trial.suggest_int("hidden_size", 8, 64, step=8)
         hidden_continuous_size = trial.suggest_int("hidden_continuous_size", 8, 64, step=8)
         dropout = trial.suggest_categorical("dropout", [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 0.9])
-        learning_rate = trial.suggest_categorical("learning_rate", [0.0001, 0.01, 0.1])
         attention_head_size = trial.suggest_int("attention_head_size", 1, 4)
 
         tft = TemporalFusionTransformer.from_dataset( # Creo il TFT con i migliori pesi
             training,
-            learning_rate=learning_rate,
+            learning_rate=res.suggestion(),
             hidden_size=hidden_size,
             dropout=dropout,
             hidden_continuous_size=hidden_continuous_size,
@@ -106,7 +133,7 @@ if __name__ == '__main__':
         lr_logger = LearningRateMonitor()
 
         trainer = pl.Trainer( # Criteri di addestramento
-            max_epochs=30,
+            max_epochs=epochs,
             accelerator="cpu",
             enable_model_summary=True,
             gradient_clip_val=0.1,
@@ -134,7 +161,7 @@ if __name__ == '__main__':
     lr_logger = LearningRateMonitor()  # log the learning rate
 
     trainer = pl.Trainer( # Definizione dei parametri di addestramento del TFT
-        max_epochs=30,
+        max_epochs=epochs,
         accelerator="cpu",
         enable_model_summary=True,
         gradient_clip_val=0.1,
@@ -143,7 +170,7 @@ if __name__ == '__main__':
 
     tft = TemporalFusionTransformer.from_dataset( # Definizione del TFT con i migliori parametri
         training,
-        learning_rate=study.best_params['learning_rate'],
+        learning_rate=res.suggestion(),
         hidden_size=study.best_params['hidden_size'],
         dropout=study.best_params['dropout'],
         hidden_continuous_size=study.best_params['hidden_continuous_size'],
@@ -160,11 +187,18 @@ if __name__ == '__main__':
     )
 
     best_model_path = trainer.checkpoint_callback.best_model_path
-    # print("Best model path: ", best_model_path)
     best_tft = TemporalFusionTransformer.load_from_checkpoint(best_model_path)
 
     # Stampa delle predizioni
-    predictions = best_tft.predict(val_dataloader, mode="raw", return_x=True)
+    predictions = best_tft.predict(val_dataloader, mode="raw", return_x=True, return_y=True)
+
+    '''
+    mae_value = MAE()(predictions.output, predictions.y)
+    rmse_value = RMSE()(predictions.output, predictions.y)  # Calcola il RMSE
+    print(f"Mean Absolute Error (MAE): {mae_value}")
+    print(f"Root Mean Square Error (RMSE): {rmse_value}")
+    '''
+
     best_tft.plot_prediction(predictions.x, predictions.output, idx=0, add_loss_to_title=True)
     plt.show()
 
@@ -174,38 +208,7 @@ if __name__ == '__main__':
     plt.show()
 
     # Stampa del confronto predizioni-valori effettivi
-    predictions = best_tft.predict(val_dataloader, return_x=True)
+    predictions = best_tft.predict(val_dataloader, return_x=True, return_y=True)
     predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output)
     best_tft.plot_prediction_actual_by_variable(predictions_vs_actuals)
     plt.show()
-    '''
-    torch.save(best_tft.state_dict(), 'Best_tft_model.pth') # Salvataggio del miglior modello
-
-    new_tft = TemporalFusionTransformer.from_dataset( # Definizione del TFT
-        training,
-        learning_rate=0.01,
-        hidden_size=5,
-        attention_head_size=2,
-        hidden_continuous_size=1,
-        loss=QuantileLoss(),
-        optimizer="Ranger",
-        reduce_on_plateau_patience=5,
-        lstm_layers=3,
-        dropout=0.5
-    )
-    new_tft.load_state_dict(torch.load('Best_tft_model.pth'), strict=False) # Ricarico il miglior modello
-    new_tft.eval() # Metto il TFT in fase di validazione
-
-    # Stampa delle predizioni
-    predictions = new_tft.predict(val_dataloader, return_x=True)
-    print("Prediction keys: ", predictions.keys())
-    new_tft.plot_prediction(predictions.y, predictions.output, idx=0, add_loss_to_title=True)
-    plt.show()
-
-    # Stampa del confronto predizioni-valori effettivi
-    predictions_vs_actuals = new_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output)
-    new_tft.plot_prediction_actual_by_variable(predictions_vs_actuals)
-    plt.show()
-    print("Prediction output: ", predictions.output)
-    print(predictions.x['groups'])
-    '''
