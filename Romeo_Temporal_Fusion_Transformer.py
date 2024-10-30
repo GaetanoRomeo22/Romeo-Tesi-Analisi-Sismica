@@ -29,12 +29,11 @@ def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl 
                         file_data = row.split(',')  # Divido il contenuto del rigo per la virgola
                         time_str = file_data[1].strip()  # Estraggo l'orario dalla colonna corretta e rimuovo spazi
                         time = f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}" # Converto il tempo in formato HH:MM:SS
-                        date = pd.to_datetime(file_data[2], format='%m%d%y').strftime('%d-%m-%Y')  # Estraggo la data
-                        date_obj = pd.to_datetime(file_data[2], format='%m%d%y')  # Converto la stringa in oggetto datetime
-                        if date_obj.month == 3 and date_obj.year == 2022 or date_obj.month == 1 and date_obj.year == 2023:  # Condizione per saltare marzo 2022
-                            continue  # Salta questa riga se è marzo 2022
+                        date = pd.to_datetime(file_data[2], format='%m%d%y')  # Estraggo la data
+                        if date.month == 3 and date.year == 2022 or date.month == 1 and date.year == 2023:  # Salta marzo 2022 e gennaio 2023
+                            continue
                         target = modf(float(file_data[10]))[0]  # Estraggo il valore di Grid Northing (parte decimale)
-                        csv_writer.writerow(['$GPLLQ', time, date, target]) # Scrivo i dati su file
+                        csv_writer.writerow(['$GPLLQ', time, date.strftime('%d-%m-%Y'), target]) # Scrivo i dati su file
                     except IndexError:
                         print("Riga incompleta")
 
