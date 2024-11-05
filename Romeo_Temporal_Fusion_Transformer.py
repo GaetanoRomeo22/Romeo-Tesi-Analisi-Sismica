@@ -7,15 +7,16 @@ from pytorch_forecasting.data import GroupNormalizer
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
 import optuna
-from pytorch_forecasting.metrics import QuantileLoss, MAE, RMSE
+from pytorch_forecasting.metrics import QuantileLoss, SMAPE
 import matplotlib.pyplot as plt
 from lightning.pytorch.tuner import Tuner
 
-'''
-wandb.init(project="Romeo_Temporal_Fusion_Transformer")
-logger = WandbLogger()
-logger = TensorBoardLogger("lightning_logs")
-'''
+# Logger per wandb (richiede wandb e WandbLogger tra gli import)
+# wandb.init(project="Romeo_Temporal_Fusion_Transformer")
+# logger = WandbLogger()
+
+# Logger per TensorBoard (richiede TensorBoard tra gli import)
+# logger = TensorBoardLogger("lightning_logs")
 
 def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl in un unico csv
     with open(output_file, mode='w', newline='') as csv_file:  # Apro il file di output in scrittura
@@ -41,20 +42,19 @@ if __name__ == '__main__':
     # Caricamento e settaggio del dataset
     rtl_to_csv("SOLO-LICO", "Dataset.csv") # Converto i file rtl in csv
     dataset = pd.read_csv("Dataset.csv")  # Creo un dataframe con pandas
-    dataset = dataset.dropna()  # Rimuovo i campi NULL
+    dataset = dataset.dropna()  # Rimuovo eventuali record incompleti
     dataset['date'] = pd.to_datetime(dataset['date'], format='%d-%m-%Y') # Converto la data nel formato corretto
-    # dataset = dataset.sort_values(by=['date', 'time'], ignore_index=True) # Ordino i dati in ordine cronologico
     dataset['month'] = dataset.date.dt.month.astype(str) # Aggiungo l'informazione relativa al mese
     dataset['year'] = dataset.date.dt.year.astype(str) # Aggiungo l'informazione relativa all'anno
     dataset['time_idx'] = dataset.groupby(['month']).cumcount()  # Aggiungo una colonna per il time index per il TFT
-    print(dataset)  # Stampo alcuni dati
+    print(dataset.head())  # Stampo alcuni dati
     train_cnt = int(len(dataset) * .8)  # 80% train e 20% test
     train = dataset.iloc[:train_cnt] # Dati di train
     test = dataset.iloc[train_cnt:] # Dati di test
     max_prediction_length = 24 # Numero di osservazioni da predire
     max_encoder_length = 168 # Numero di osservazioni da analizzare per le predizioni
     batch_size = 64
-    epochs = 30
+    epochs = 50 # Numero di epoche
 
     training = TimeSeriesDataSet( # Converto il dataset nel formato richiesto dal TFT
         train, # Dati di addestramento
@@ -92,11 +92,11 @@ if __name__ == '__main__':
     )
     tft = TemporalFusionTransformer.from_dataset(
         training,
-        learning_rate=0.03,
-        hidden_size=8,
+        learning_rate=0.01,
+        hidden_size=40,
         attention_head_size=1,
-        dropout=0.1,
-        hidden_continuous_size=8,
+        dropout=0.2,
+        hidden_continuous_size=24,
         loss=QuantileLoss(),
         optimizer="Ranger"
     )
@@ -107,10 +107,14 @@ if __name__ == '__main__':
         max_lr=0.01,
         min_lr=0.0001
     )
-    fig = res.plot(show=True, suggest=True)
-    fig.show()
+
+    # Visualizzazione del grafico del learning rate ottimale
+    # fig = res.plot(show=True, suggest=True)
+    # fig.show()
 
     def objective(trial): # Funzione per trovare i migliori pesi di addestramento
+
+        # Dominio dei valori da provare per ogni peso
         hidden_size = trial.suggest_int("hidden_size", 8, 64, step=8)
         hidden_continuous_size = trial.suggest_int("hidden_continuous_size", 8, 64, step=8)
         dropout = trial.suggest_categorical("dropout", [0.1, 0.2, 0.3, 0.4, 0.5, 0.7, 0.9])
@@ -138,7 +142,8 @@ if __name__ == '__main__':
             enable_model_summary=True,
             gradient_clip_val=0.1,
             callbacks=[lr_logger, early_stop_callback],
-            enable_checkpointing=True
+            enable_checkpointing=True,
+            # logger=logger
         )
 
         trainer.fit( # Fase di addestramento
@@ -147,25 +152,26 @@ if __name__ == '__main__':
             val_dataloaders=val_dataloader
         )
 
-        # Valutazione del modello in termini di validaiton loss
-        val_loss = trainer.callback_metrics['val_loss'].item()
-        return val_loss
+        # Valutazione del modello in termini di validation loss
+        return trainer.callback_metrics['val_loss'].item()
 
-    # Create a Study and specify the direction of optimization
+    # Creazione di un nuovo studio optuna con l'obiettivo di minimizzare la validation loss
     study = optuna.create_study(direction="minimize", storage="sqlite:///Romeo_Temporal_Fusion_Transformer.db")
 
-    # Optimize the objective function
-    study.optimize(objective, n_trials=10)
+    # Tentativi di ottimizzazione
+    study.optimize(objective, n_trials=5)
 
+    # Monitoro il training per interromperlo quando la validation loss raggiunge un valore delta minimo
     early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=10, verbose=False, mode="min")
-    lr_logger = LearningRateMonitor()  # log the learning rate
+    lr_logger = LearningRateMonitor()
 
     trainer = pl.Trainer( # Definizione dei parametri di addestramento del TFT
         max_epochs=epochs,
         accelerator="cpu",
         enable_model_summary=True,
         gradient_clip_val=0.1,
-        callbacks=[lr_logger, early_stop_callback]
+        callbacks=[lr_logger, early_stop_callback],
+        # logger=logger
     )
 
     tft = TemporalFusionTransformer.from_dataset( # Definizione del TFT con i migliori parametri
@@ -186,29 +192,25 @@ if __name__ == '__main__':
         val_dataloaders=val_dataloader
     )
 
+    # Stampa della validation loss
+    print("Validation loss finale:", trainer.callback_metrics['val_loss'].item())
+
+    # Carico il TFT con i pesi ottimali
     best_model_path = trainer.checkpoint_callback.best_model_path
     best_tft = TemporalFusionTransformer.load_from_checkpoint(best_model_path)
 
     # Stampa delle predizioni
     predictions = best_tft.predict(val_dataloader, mode="raw", return_x=True, return_y=True)
-
-    '''
-    mae_value = MAE()(predictions.output, predictions.y)
-    rmse_value = RMSE()(predictions.output, predictions.y)  # Calcola il RMSE
-    print(f"Mean Absolute Error (MAE): {mae_value}")
-    print(f"Root Mean Square Error (RMSE): {rmse_value}")
-    '''
-
-    best_tft.plot_prediction(predictions.x, predictions.output, idx=0, add_loss_to_title=True)
+    best_tft.plot_prediction(predictions.x, predictions.output, idx=0, add_loss_to_title=SMAPE(quantiles=best_tft.loss.quantiles))
     plt.show()
 
-    # Stampa delle interpretazioni
+    # Stampa delle interpretazioni (importanza e attenzione)
     interpretation = best_tft.interpret_output(predictions.output, reduction="sum")
     best_tft.plot_interpretation(interpretation)
     plt.show()
 
     # Stampa del confronto predizioni-valori effettivi
     predictions = best_tft.predict(val_dataloader, return_x=True, return_y=True)
-    predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output)
+    predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output, normalize=False)
     best_tft.plot_prediction_actual_by_variable(predictions_vs_actuals)
     plt.show()
