@@ -29,16 +29,17 @@ from lightning.pytorch.tuner import Tuner
 
 """-------------------------------------------------------------------------------------------------
 Per una più comoda gestione del dataset, ho convertito tutti i file .rtl in un unico file .csv.
-Gli unici campi memorizzati sono l'ID, l'ora, la data e il valore da predire (East, North o Height).
+Gli unici campi memorizzati sono l'ora, la data e il valore da predire (East, North o Height).
 Siccome è stato notato che il valore intero per le osservazioni è costante, per il campo target
 è stata estratta solo la parte decimale.
 Avendo a disposizione dati compresi tra i valori 0.1 e 0.9, è stato ritenuto opportuno non adottare
 alcuna normalizzazione.
+Le osservazioni inerenti a marzo 2022 e gennaio 2023 sono state ignorate in quanto non sufficienti.
 -------------------------------------------------------------------------------------------------"""
 def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl in un unico csv
     with open(output_file, mode='w', newline='') as csv_file:  # Apro il file di output in scrittura
         csv_writer = csv.writer(csv_file, delimiter=',')  # csv_writer per scrivere sul file
-        csv_writer.writerow(['ID', 'time', 'date', 'height'])  # Scrivo i nomi dei campi da salvare
+        csv_writer.writerow(['time', 'date', 'height'])  # Scrivo i nomi dei campi da salvare
         for file in os.listdir(folder_path):  # Elenco tutti i file della directory
             file_path = os.path.join(folder_path, file)  # Ottengo il path del file
             with open(file_path, mode='r') as rtl_file:  # Apro il file rtl in lettura
@@ -51,18 +52,33 @@ def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl 
                         if date.month == 3 and date.year == 2022 or date.month == 1 and date.year == 2023:  # Salta marzo 2022 e gennaio 2023 perchè ci sono pochi dati
                             continue
                         target = modf(float(file_data[10]))[0]  # Estraggo il valore di Grid Northing (parte decimale)
-                        csv_writer.writerow(['$GPLLQ', time, date.strftime('%d-%m-%Y'), target]) # Scrivo i dati su file
+                        csv_writer.writerow([time, date.strftime('%d-%m-%Y'), target]) # Scrivo i dati su file
                     except IndexError:
                         print("Riga incompleta")
 
 if __name__ == '__main__':
+    """-------------------------------------------------------------------------------------------------
+    Come prima cosa, utilizzo la funzione definita per convertire i file rtl in un unico file csv
+    contenente i campi ID, ora, data e target.
+    Fatto ciò, utilizzo pandas per salvare tutti i dati in un dataframe e uso dropna per eliminare
+    eventuali record incompleti.
+    Successivamente costruisco un campo descrittivo per indicare il mese di ogni osservazione da
+    utilizzare per raggruppare i dati.
+    Il campo "time_idx", che consiste in un identificativo progressivo per ogni osservazione,
+    fa riferimento al mese, il che significa che ogni mese di osservazioni sarà una serie temporale.
+    Il dataset è diviso nella parte di dati utilizzata per l'addestramento (80%) e in quella
+    utilizzata per le predizioni (20%).
+    I campi max_prediction_length e max_encoder_length indicano, rispettivamente, quante osservazioni
+    il modello deve predire e quante deve osservarne per generare le predizioni.
+    In questo caso sono state impostate a 24 e 168, il che significa che l'obiettivo è predire una
+    settimana di osservazioni a partire da tre settimane.
+    -------------------------------------------------------------------------------------------------"""
     # Caricamento e settaggio del dataset
-    rtl_to_csv("RITE-LICO", "RITE-LICO_Dataset.csv") # Converto i file rtl in csv
-    dataset = pd.read_csv("RITE-LICO_Dataset.csv")  # Creo un dataframe con pandas
+    rtl_to_csv("SOLO-LICO", "SOLO-LICO_Dataset.csv") # Converto i file rtl in csv
+    dataset = pd.read_csv("SOLO-LICO_Dataset.csv")  # Creo un dataframe con pandas
     dataset = dataset.dropna()  # Rimuovo eventuali record incompleti
     dataset['date'] = pd.to_datetime(dataset['date'], format='%d-%m-%Y') # Converto la data nel formato corretto
     dataset['month'] = dataset.date.dt.month.astype(str) # Aggiungo l'informazione relativa al mese
-    dataset['year'] = dataset.date.dt.year.astype(str) # Aggiungo l'informazione relativa all'anno
     dataset['time_idx'] = dataset.groupby(['month']).cumcount()  # Aggiungo una colonna per il time index per il TFT raggruppando per il mese
     print(dataset.head())  # Stampo alcuni dati
     train_cnt = int(len(dataset) * .8)  # Divido il dataset in 80% train e 20% test
@@ -82,20 +98,18 @@ if __name__ == '__main__':
         max_encoder_length=max_encoder_length, # Numero di osservazioni da analizzare per le predizioni
         min_prediction_length=1, # Numero minimo di osservazioni da predire
         max_prediction_length=max_prediction_length, # Numero di osservazioni da predire
-        static_categoricals=['ID'], # Variabili statiche categoriche che non cambiano nel tempo
         time_varying_known_reals=['time_idx'], # Parametri che cambiano nel tempo e di cui si conosce il valore futuro
         time_varying_unknown_reals=['height'], # Parametri che cambiano nel tempo e di cui non si conosce il valore futuro
         target_normalizer=GroupNormalizer(
             groups=['month'],
             transformation="softplus"
         ),
-        add_relative_time_idx=True,
-        add_target_scales=True,
-        add_encoder_length=True,
-        allow_missing_timesteps=True
+        add_relative_time_idx=True, # Aggiunge il time_idx alle features
+        add_target_scales=False, # Non aggiunge la media al target
+        allow_missing_timesteps=True # Consente serie temporali interrotte
     )
 
-    # Divisione del dataset in training e validation
+    # Divisione del dataset in training e validation (l'aggiunta dei workers consente il lavoro in parallelo)
     validation = TimeSeriesDataSet.from_dataset(training, dataset, predict=True, stop_randomization=True)
     train_dataloader = training.to_dataloader(train=True, batch_size=batch_size, num_workers=8, persistent_workers=True)
     val_dataloader = validation.to_dataloader(train=False, batch_size=batch_size * 10, num_workers=8, persistent_workers=True)
