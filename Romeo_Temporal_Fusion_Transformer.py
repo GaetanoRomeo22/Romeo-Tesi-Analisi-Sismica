@@ -409,11 +409,11 @@ if __name__ == '__main__':
     best_tft = TemporalFusionTransformer.load_from_checkpoint(best_model_path)
 
     # Salvo il modello ottimale
-    torch.save(best_tft, "Migliori_Modelli/Romeo_Best_TFT_Height.pth")
+    torch.save(best_tft, "Romeo_Best_TFT_Height.pth")
     '''
 
     # Carico il miglior modello e lo metto in fase di validazione
-    best_tft = torch.load("Migliori_Modelli/Romeo_Best_TFT_Height.pth")
+    best_tft = torch.load("Romeo_Best_TFT_Height.pth")
     best_tft.eval()
     """-------------------------------------------------------------------------------------------------
     La seguente parte di codice mette in evidenza la fase di validazione del modello.
@@ -448,5 +448,5 @@ if __name__ == '__main__':
         "Valori Effettivi (Height)": values_actual,
         "Predizioni (Height)": values_prediction
     })
-    predictions_dataframe.to_csv("Predizioni_Heighh.csv", index=True)
+    predictions_dataframe.to_csv("Predizioni_Height.csv", index=True)
     print(tabulate(predictions_dataframe, headers='keys', tablefmt='fancy_grid'))
