@@ -9,22 +9,18 @@ Autore: Gaetano Romeo
 import csv
 import os
 from math import modf
-from typing import Dict, Any, Union
-import numpy as np
-from lightning import Trainer
-from pytorch_forecasting.models.base_model import PredictCallback, Prediction
 from tabulate import tabulate
 import pandas as pd
-from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer, to_list
+from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
 from pytorch_forecasting.data import GroupNormalizer
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor
 import optuna
-from pytorch_forecasting.metrics import QuantileLoss, Metric, MASE
+from pytorch_forecasting.metrics import QuantileLoss
 import matplotlib.pyplot as plt
 from lightning.pytorch.tuner import Tuner
 import torch
-from torch.utils.data import DataLoader
+from scipy.signal import medfilt
 
 # Logger per wandb (richiede wandb e WandbLogger tra gli import)
 # wandb.init(project="Romeo_Temporal_Fusion_Transformer")
@@ -45,7 +41,7 @@ Le osservazioni inerenti a marzo 2022 e gennaio 2023 sono state ignorate in quan
 def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl in un unico csv
     with open(output_file, mode='w', newline='') as csv_file:  # Apro il file di output in scrittura
         csv_writer = csv.writer(csv_file, delimiter=',')  # csv_writer per scrivere sul file
-        csv_writer.writerow(['date', 'height'])  # Scrivo i nomi dei campi da salvare
+        csv_writer.writerow(['ID', 'date', 'east', 'north', 'height'])  # Scrivo i nomi dei campi da salvare
         for file in os.listdir(folder_path):  # Elenco tutti i file della directory
             file_path = os.path.join(folder_path, file)  # Ottengo il path del file
             with open(file_path, mode='r') as rtl_file:  # Apro il file rtl in lettura
@@ -54,155 +50,10 @@ def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl 
                     date = pd.to_datetime(file_data[2], format='%m%d%y')  # Estraggo la data in formato MM-DD-YYYY
                     if date.month == 3 and date.year == 2022 or date.month == 1 and date.year == 2023:  # Salta marzo 2022 e gennaio 2023 perchè ci sono pochi dati
                         continue
-                    # east = modf(float(file_data[3]))[0]
-                    # north = modf(float(file_data[5]))[0]
-                    height = modf(float(file_data[10]))[0]
-                    csv_writer.writerow([date.strftime('%d-%m-%Y'), height]) # Scrivo i dati su file
-
-def predict(model, dataloader: DataLoader, mode: str = "prediction", return_index: bool = False, return_decoder_lengths: bool = False, return_x: bool = True, return_y: bool = False) -> Prediction:
-    """
-    Run inference / prediction.
-    Args:
-        model: model to train to get predictions
-        dataloader: dataloader of input
-        mode: one of "prediction", "quantiles", or "raw"
-        return_index: if to return the prediction index (in the same order as the output, i.e. the row of the
-            dataframe corresponds to the first dimension of the output and the given time index is the time index
-            of the first prediction)
-        return_decoder_lengths: if to return decoder_lengths (in the same order as the output)
-        return_x: if to return network inputs (in the same order as prediction output)
-        return_y: if to return network targets (in the same order as prediction output)
-    Returns:
-        Prediction: if one of the ```return`` arguments is present,
-            prediction tuple with fields ``prediction``, ``x``, ``y``, ``index`` and ``decoder_lengths``
-    """
-    predict_callback = PredictCallback(
-        mode=mode,
-        return_index=return_index,
-        return_decoder_lengths=return_decoder_lengths,
-        write_interval="batch",
-        return_x=return_x,
-        return_y=return_y,
-    )
-    trainer_kwargs = {}
-    trainer_kwargs.setdefault("callbacks", trainer_kwargs.get("callbacks", []) + [predict_callback])
-    trainer_kwargs.setdefault("enable_progress_bar", False)
-    trainer_kwargs.setdefault("inference_mode", False)
-    trainer = Trainer(fast_dev_run=False, **trainer_kwargs)
-    trainer.predict(model, dataloader)
-    return predict_callback.result
-
-def plot_prediction(model, x: Dict[str, torch.Tensor], out: Dict[str, torch.Tensor], idx: int = 0, add_loss_to_title: Union[Metric, torch.Tensor, bool] = False):
-    """
-    Plot prediction of prediction vs actuals
-    Args:
-        model: model from which get predictions
-        x: network input
-        out: network output
-        idx: index of prediction to plot
-        add_loss_to_title: if to add loss to title or loss function to calculate. Can be either metrics,
-            bool indicating if to use loss metric or tensor which contains losses for all samples.
-            Calcualted losses are determined without weights. Default to False.
-    Returns:
-        matplotlib figure
-    """
-    # all true values for y of the first sample in batch
-    encoder_targets = to_list(x["encoder_target"])
-    decoder_targets = to_list(x["decoder_target"])
-
-    y_raws = to_list(out["prediction"])  # raw predictions - used for calculating loss
-    y_hats = to_list(to_prediction(model, out))
-
-    # for each target, plot
-    figs = []
-    for y_raw, y_hat, encoder_target, decoder_target in zip(
-        y_raws, y_hats, encoder_targets, decoder_targets
-    ):
-        y_all = torch.cat([encoder_target[idx], decoder_target[idx]])
-        max_encoder_length = x["encoder_lengths"].max()
-        y = torch.cat(
-            (
-                y_all[: x["encoder_lengths"][idx]],
-                y_all[max_encoder_length : (max_encoder_length + x["decoder_lengths"][idx])],
-            ),
-        )
-        # move predictions to cpu
-        y_hat = y_hat.detach().cpu()[idx, : x["decoder_lengths"][idx]]
-        y_raw = y_raw.detach().cpu()[idx, : x["decoder_lengths"][idx]]
-
-        # move to cpu
-        y = y.detach().cpu()
-        # create figure
-        fig, ax = plt.subplots()
-        n_pred = y_hat.shape[0]
-        x_pred = np.arange(n_pred)
-        prop_cycle = iter(plt.rcParams["axes.prop_cycle"])
-        obs_color = next(prop_cycle)["color"]
-        pred_color = next(prop_cycle)["color"]
-        if len(x_pred) > 1:
-            plotter = ax.plot
-        else:
-            plotter = ax.scatter
-
-        # plot observed prediction
-        plotter(x_pred, y[-n_pred:], label=None, c=obs_color)
-
-        # plot prediction
-        plotter(x_pred, y_hat, label="predicted", c=pred_color)
-
-        # print the loss
-        if add_loss_to_title is not False:
-            if isinstance(add_loss_to_title, bool):
-                loss = model.loss
-            elif isinstance(add_loss_to_title, torch.Tensor):
-                loss = add_loss_to_title.detach()[idx].item()
-            elif isinstance(add_loss_to_title, Metric):
-                loss = add_loss_to_title
-            else:
-                raise ValueError(f"add_loss_to_title '{add_loss_to_title}'' is unkown")
-            if isinstance(loss, MASE):
-                loss_value = loss(y_raw[None], (y[-n_pred:][None], None), y[:n_pred][None])
-            elif isinstance(loss, Metric):
-                try:
-                    loss_value = loss(y_raw[None], (y[-n_pred:][None], None))
-                except Exception:
-                    loss_value = "-"
-            else:
-                loss_value = loss
-            ax.set_title(f"Loss {loss_value}")
-        ax.set_xlabel("Time index")
-        fig.legend()
-        figs.append(fig)
-
-    # return multiple of target is a list, otherwise return single figure
-    if isinstance(x["encoder_target"], (tuple, list)):
-        return figs
-    else:
-        return fig
-
-def to_prediction(model, out: Dict[str, Any]):
-    """
-    Convert output to prediction using the loss metric.
-    Args:
-        model: model from which get the loss
-        out (Dict[str, Any]): output of network where "prediction" has been
-            transformed with :py:meth:`~transform_output`
-    Returns:
-        torch.Tensor: predictions of shape batch_size x timesteps
-    """
-    return model.loss.to_prediction(out["prediction"])
-
-def to_quantiles(model, out: Dict[str, Any]):
-    """
-    Convert output to quantiles using the loss metric.
-    Args:
-        model: model from which get the loss
-        out (Dict[str, Any]): output of network where "prediction" has been
-            transformed with :py:meth:`~transform_output`
-    Returns:
-        torch.Tensor: quantiles of shape batch_size x timesteps x n_quantiles
-    """
-    return model.loss.to_quantiles(out["prediction"])
+                    east = modf(float(file_data[3]))[0] # Estraggo la parte frazionaria del campo East
+                    north = modf(float(file_data[5]))[0] # Estraggo la parte frazionaria del campo North
+                    height = modf(float(file_data[10]))[0] # Estraggo la parte frazionaria del campo Height
+                    csv_writer.writerow(['$GPLLQ', date.strftime('%d-%m-%Y'), east, north, height]) # Scrivo i dati su file
 
 if __name__ == '__main__':
     """-------------------------------------------------------------------------------------------------
@@ -227,15 +78,23 @@ if __name__ == '__main__':
     dataset['month'] = dataset.date.dt.month.astype(str) # Aggiungo l'informazione relativa al mese
     dataset['time_idx'] = dataset.groupby(['month']).cumcount()  # Aggiungo una colonna per il time index per il TFT raggruppando per il mese
     dataset['date'] = dataset['date'].dt.date # Tronco la data per evitare problemi di visualizzazione
-    # print(dataset.head())
+
+    # Filtraggio dati con filtro mediano
+    dataset['east'] = medfilt(dataset['east'], kernel_size=15)
+    dataset['north'] = medfilt(dataset['north'], kernel_size=15)
+    dataset['height'] = medfilt(dataset['height'], kernel_size=15)
+    print(dataset.head())
+
+    # Divisione dataset in train e validation
     train_cnt = int(len(dataset) * .8)  # Divido il dataset in 80% train e 20% test
     train = dataset.iloc[:train_cnt] # Dati di train
     test = dataset.iloc[train_cnt:] # Dati di test
-    max_prediction_length = 24 # Numero di osservazioni da predire
-    max_encoder_length = 168 # Numero di osservazioni da analizzare per le predizioni
+    max_prediction_length = 168 # Numero di osservazioni da predire
+    max_encoder_length = 504 # Numero di osservazioni da analizzare per le predizioni
     batch_size = 64
     epochs = 10 # Numero di epoche
 
+    # Costruzione del dataset nel formato richiesto dal Temporal Fusion Transformer
     training = TimeSeriesDataSet( # Converto il dataset nel formato richiesto dal TFT
         train, # Dati di addestramento
         time_idx='time_idx', # Indice temporale per le serie temporali
@@ -245,9 +104,10 @@ if __name__ == '__main__':
         max_encoder_length=max_encoder_length, # Numero di osservazioni da analizzare per le predizioni
         min_prediction_length=1, # Numero minimo di osservazioni da predire
         max_prediction_length=max_prediction_length, # Numero di osservazioni da predire
-        time_varying_known_reals=['time_idx'], # Parametri che cambiano nel tempo e di cui si conosce il valore futuro
-        time_varying_unknown_reals=['height'], # Parametri che cambiano nel tempo e di cui non si conosce il valore futuro
-        target_normalizer=GroupNormalizer(
+        # static_categoricals=['ID'], # Parametri categorici statici
+        time_varying_known_reals=['time_idx', 'east', 'north'], # Parametri che variao nel tempo e di cui si conosce il valore futuro
+        time_varying_unknown_reals=['height'], # Parametri che variano nel tempo e di cui non si conosce il valore futuro
+        target_normalizer=GroupNormalizer( # Normalizzazione dei parametri
             groups=['month'],
             transformation="softplus"
         ),
@@ -256,7 +116,7 @@ if __name__ == '__main__':
         allow_missing_timesteps=True # Consente serie temporali interrotte
     )
 
-    # Divisione del dataset in training e validation (l'aggiunta dei workers consente il lavoro in parallelo)
+    # Creazione dataloader di train e validation (l'aggiunta dei workers consente il lavoro in parallelo)
     validation = TimeSeriesDataSet.from_dataset(training, dataset, predict=True, stop_randomization=True)
     train_dataloader = training.to_dataloader(train=True, batch_size=batch_size, num_workers=8, persistent_workers=True)
     val_dataloader = validation.to_dataloader(train=False, batch_size=batch_size * 10, num_workers=8, persistent_workers=True)
@@ -279,7 +139,6 @@ if __name__ == '__main__':
     Una volta trovato il valore, lo si memorizza ed è possibile visualizzarne il grafico.
     Il valore è cercato nell'intervallo [0.01, 0.0001] consigliato nel paper di riferimento del TFT.
     -------------------------------------------------------------------------------------------------"""
-    '''
     # Fase di ricerca del miglior learning rate con Tuner
     pl.seed_everything(42)
     trainer = pl.Trainer(
@@ -342,7 +201,7 @@ if __name__ == '__main__':
         )
 
         # Monitoro il learning rate per stoppare l'algoritmo di addestramento quando non apprende ulteriormente
-        early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=3, verbose=False, mode="min")
+        early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.004, patience=3, verbose=False, mode="min")
         lr_logger = LearningRateMonitor()
 
         trainer = pl.Trainer( # Criteri di addestramento
@@ -368,10 +227,10 @@ if __name__ == '__main__':
     study = optuna.create_study(direction="minimize", storage="sqlite:///Romeo_Temporal_Fusion_Transformer.db")
 
     # Tentativi di ottimizzazione
-    study.optimize(objective, n_trials=5)
+    study.optimize(objective, n_trials=10)
 
     # Monitoro il training per interromperlo quando la validation loss raggiunge un valore delta minimo
-    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=1e-4, patience=10, verbose=False, mode="min")
+    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.004, patience=3, verbose=False, mode="min")
     lr_logger = LearningRateMonitor()
 
     trainer = pl.Trainer( # Definizione dei parametri di addestramento del TFT
@@ -409,11 +268,10 @@ if __name__ == '__main__':
     best_tft = TemporalFusionTransformer.load_from_checkpoint(best_model_path)
 
     # Salvo il modello ottimale
-    torch.save(best_tft, "Romeo_Best_TFT_Height.pth")
-    '''
+    torch.save(best_tft, "Migliori_Modelli/Romeo_Best_TFT_Height.pth")
 
     # Carico il miglior modello e lo metto in fase di validazione
-    best_tft = torch.load("Romeo_Best_TFT_Height.pth")
+    best_tft = torch.load("Migliori_Modelli/Romeo_Best_TFT_Height.pth")
     best_tft.eval()
     """-------------------------------------------------------------------------------------------------
     La seguente parte di codice mette in evidenza la fase di validazione del modello.
@@ -423,9 +281,9 @@ if __name__ == '__main__':
     Infine è visualizzato un grafico che mette a confronto i valori predetti e quelli effettivi.
     -------------------------------------------------------------------------------------------------"""
     # Ottengo e stampo le predizioni del modello
-    predictions = predict(model=best_tft, dataloader=val_dataloader, mode="raw", return_index=True, return_decoder_lengths=True, return_x=True, return_y=True)
+    predictions = best_tft.predict(val_dataloader, mode="raw", return_x=True)
     for idx in range(len(predictions)):
-        plot_prediction(model=best_tft, x=predictions.x, out=predictions.output, idx=idx, add_loss_to_title=True)
+        best_tft.plot_prediction(predictions.x, predictions.output, idx=idx, add_loss_to_title=True)
     plt.show()
 
     # Stampa delle interpretazioni (importanza e attenzione)
@@ -434,11 +292,12 @@ if __name__ == '__main__':
     plt.show()
 
     # Stampa del confronto predizioni-valori effettivi
-    predictions = predict(model=best_tft, dataloader=val_dataloader, mode="prediction", return_index=False, return_decoder_lengths=False, return_x=True, return_y=False)
+    predictions = best_tft.predict(val_dataloader, return_x=True)
     predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output, normalize=False)
     best_tft.plot_prediction_actual_by_variable(predictions_vs_actuals)
     plt.show()
 
+    '''
     predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output)
     values_actual = predictions_vs_actuals["average"]["actual"]["height"].cpu()
     values_prediction = predictions_vs_actuals["average"]["prediction"]["height"].cpu()
@@ -450,3 +309,4 @@ if __name__ == '__main__':
     })
     predictions_dataframe.to_csv("Predizioni_Height.csv", index=True)
     print(tabulate(predictions_dataframe, headers='keys', tablefmt='fancy_grid'))
+    '''
