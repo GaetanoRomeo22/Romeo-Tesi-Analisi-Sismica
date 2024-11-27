@@ -17,9 +17,9 @@ class Dataset_Custom(Dataset):
         self.args = args
         # info
         if size is None:
-            self.seq_len = 168
-            self.label_len = 0
-            self.pred_len = 24
+            self.seq_len = 504
+            self.label_len = 168
+            self.pred_len = 168
         else:
             self.seq_len = size[0]
             self.label_len = size[1]
