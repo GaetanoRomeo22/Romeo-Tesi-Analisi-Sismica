@@ -9,6 +9,7 @@ Autore: Gaetano Romeo
 import csv
 import os
 from math import modf
+from pandas import DataFrame
 from tabulate import tabulate
 import pandas as pd
 from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
@@ -38,7 +39,7 @@ Avendo a disposizione dati compresi tra i valori 0.1 e 0.9, è stato ritenuto op
 alcuna normalizzazione.
 Le osservazioni inerenti a marzo 2022 e gennaio 2023 sono state ignorate in quanto non sufficienti.
 -------------------------------------------------------------------------------------------------"""
-def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl in un unico csv
+def rtl_to_csv(folder_path: str, output_file: str):  # Converto il contenuto dei file rtl in un unico csv
     with open(output_file, mode='w', newline='') as csv_file:  # Apro il file di output in scrittura
         csv_writer = csv.writer(csv_file, delimiter=',')  # csv_writer per scrivere sul file
         csv_writer.writerow(['ID', 'date', 'east', 'north', 'height'])  # Scrivo i nomi dei campi da salvare
@@ -54,6 +55,35 @@ def rtl_to_csv(folder_path, output_file):  # Converto il contenuto dei file rtl 
                     north = modf(float(file_data[5]))[0] # Estraggo la parte frazionaria del campo North
                     height = modf(float(file_data[10]))[0] # Estraggo la parte frazionaria del campo Height
                     csv_writer.writerow(['$GPLLQ', date.strftime('%d-%m-%Y'), east, north, height]) # Scrivo i dati su file
+
+def prepare_dataset(file_path: str) -> DataFrame: # Leggo il contenuto del file csv
+    df = pd.read_csv(file_path)  # Creo un dataframe con pandas
+    df['date'] = pd.to_datetime(df['date'], format='%d-%m-%Y')  # Converto la data nel formato corretto
+    df['day'] = df.date.dt.day.astype(str)  # Aggiungo l'informazione relativa al giorno
+    df['month'] = df.date.dt.month.astype(str)  # Aggiungo l'informazione relativa al mese
+    df['year'] = df.date.dt.year.astype(str)  # Aggiungo l'informazione relativa all'anno
+    df['time_idx'] = df.groupby(['month']).cumcount()  # Aggiungo una colonna per il time index per il TFT raggruppando per il mese
+    df['date'] = df['date'].dt.date  # Tronco la data per evitare problemi di visualizzazione
+    return df
+
+def show_dataset(df: DataFrame, target: str, title: str): # Visualizzo il dataset
+    plt.figure(figsize=(10, 6))
+    plt.scatter(dataset['date'], df[target], color='blue', alpha=0.5, label=target)
+    plt.title(title, fontsize=16)
+    plt.xlabel('Data', fontsize=14)
+    plt.ylabel(target, fontsize=14)
+    plt.xticks(rotation=45, fontsize=10)
+    plt.yticks(fontsize=10)
+    plt.legend()
+    plt.grid(alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+
+def apply_median_filter(df: DataFrame, kernel_size: int): # Applico un filtro mediano ai dati per ridurre il rumore
+    assert kernel_size % 2 != 0, "Il kernel_size deve essere un numero dispari."
+    df['east'] = medfilt(df['east'], kernel_size=kernel_size)
+    df['north'] = medfilt(df['north'], kernel_size=kernel_size)
+    df['height'] = medfilt(df['height'], kernel_size=kernel_size)
 
 if __name__ == '__main__':
     """-------------------------------------------------------------------------------------------------
@@ -73,17 +103,10 @@ if __name__ == '__main__':
     -------------------------------------------------------------------------------------------------"""
     # Caricamento e settaggio del dataset
     rtl_to_csv("STRZ-LICO", "STRZ-LICO_Dataset.csv") # Converto i file rtl in csv
-    dataset = pd.read_csv("STRZ-LICO_Dataset.csv")  # Creo un dataframe con pandas
-    dataset['date'] = pd.to_datetime(dataset['date'], format='%d-%m-%Y') # Converto la data nel formato corretto
-    dataset['month'] = dataset.date.dt.month.astype(str) # Aggiungo l'informazione relativa al mese
-    dataset['time_idx'] = dataset.groupby(['month']).cumcount()  # Aggiungo una colonna per il time index per il TFT raggruppando per il mese
-    dataset['date'] = dataset['date'].dt.date # Tronco la data per evitare problemi di visualizzazione
-
-    # Filtraggio dati con filtro mediano
-    dataset['east'] = medfilt(dataset['east'], kernel_size=15)
-    dataset['north'] = medfilt(dataset['north'], kernel_size=15)
-    dataset['height'] = medfilt(dataset['height'], kernel_size=15)
-    print(dataset.head())
+    dataset = prepare_dataset("STRZ-LICO_Dataset.csv") # Leggo il file csv e carico il contenuto in un dataframe pandas
+    # show_dataset(dataset, 'height', 'Dataset') # Mostro un grafico per visualizzare il dataset originale
+    apply_median_filter(dataset, kernel_size=15)  # Filtro i dati con un filtro mediano per ridurre il rumore
+    # show_dataset(dataset, 'height', 'Dataset filtrato') # Mostro un grafico per visualizzare il dataset post filtraggio
 
     # Divisione dataset in train e validation
     train_cnt = int(len(dataset) * .8)  # Divido il dataset in 80% train e 20% test
@@ -100,12 +123,12 @@ if __name__ == '__main__':
         time_idx='time_idx', # Indice temporale per le serie temporali
         target='height', # Valore da predire
         group_ids=['month'], # Campo utilizzato per identificare univocamente le serie temporali
-        min_encoder_length=max_encoder_length, # Numero minimo di osservazioni da analizzare per le predizioni
+        min_encoder_length=max_encoder_length // 2, # Numero minimo di osservazioni da analizzare per le predizioni
         max_encoder_length=max_encoder_length, # Numero di osservazioni da analizzare per le predizioni
         min_prediction_length=1, # Numero minimo di osservazioni da predire
         max_prediction_length=max_prediction_length, # Numero di osservazioni da predire
-        # static_categoricals=['ID'], # Parametri categorici statici
-        time_varying_known_reals=['time_idx', 'east', 'north'], # Parametri che variao nel tempo e di cui si conosce il valore futuro
+        static_categoricals=['ID'], # Parametri categorici statici
+        time_varying_known_reals=['time_idx', 'east', 'north', 'day', 'year'], # Parametri che variano nel tempo e di cui si conosce il valore futuro
         time_varying_unknown_reals=['height'], # Parametri che variano nel tempo e di cui non si conosce il valore futuro
         target_normalizer=GroupNormalizer( # Normalizzazione dei parametri
             groups=['month'],
@@ -113,7 +136,8 @@ if __name__ == '__main__':
         ),
         add_relative_time_idx=True, # Aggiunge il time_idx alle features
         add_target_scales=True, # Aggiunge la media al target
-        allow_missing_timesteps=True # Consente serie temporali interrotte
+        allow_missing_timesteps=True, # Consente serie temporali interrotte
+        add_encoder_length=True
     )
 
     # Creazione dataloader di train e validation (l'aggiunta dei workers consente il lavoro in parallelo)
@@ -139,6 +163,7 @@ if __name__ == '__main__':
     Una volta trovato il valore, lo si memorizza ed è possibile visualizzarne il grafico.
     Il valore è cercato nell'intervallo [0.01, 0.0001] consigliato nel paper di riferimento del TFT.
     -------------------------------------------------------------------------------------------------"""
+    '''
     # Fase di ricerca del miglior learning rate con Tuner
     pl.seed_everything(42)
     trainer = pl.Trainer(
@@ -269,6 +294,7 @@ if __name__ == '__main__':
 
     # Salvo il modello ottimale
     torch.save(best_tft, "Migliori_Modelli/Romeo_Best_TFT_Height.pth")
+    '''
 
     # Carico il miglior modello e lo metto in fase di validazione
     best_tft = torch.load("Migliori_Modelli/Romeo_Best_TFT_Height.pth")
@@ -286,16 +312,20 @@ if __name__ == '__main__':
         best_tft.plot_prediction(predictions.x, predictions.output, idx=idx, add_loss_to_title=True)
     plt.show()
 
+    '''
     # Stampa delle interpretazioni (importanza e attenzione)
     interpretation = best_tft.interpret_output(predictions.output, reduction="sum")
     best_tft.plot_interpretation(interpretation)
     plt.show()
+    '''
 
+    '''
     # Stampa del confronto predizioni-valori effettivi
     predictions = best_tft.predict(val_dataloader, return_x=True)
     predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output, normalize=False)
     best_tft.plot_prediction_actual_by_variable(predictions_vs_actuals)
     plt.show()
+    '''
 
     '''
     predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output)
