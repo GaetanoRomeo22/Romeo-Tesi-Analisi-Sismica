@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 from lightning.pytorch.tuner import Tuner
 import torch
 from scipy.signal import medfilt
+from statsmodels.tsa.stattools import adfuller
 
 # Logger per wandb (richiede wandb e WandbLogger tra gli import)
 # wandb.init(project="Romeo_Temporal_Fusion_Transformer")
@@ -57,6 +58,7 @@ def rtl_to_csv(folder_path: str, output_file: str):  # Converto il contenuto dei
                     csv_writer.writerow(['$GPLLQ', date.strftime('%d-%m-%Y'), east, north, height]) # Scrivo i dati su file
 
 def prepare_dataset(file_path: str) -> DataFrame: # Leggo il contenuto del file csv
+    rtl_to_csv("SOLO-LICO", "SOLO-LICO_Dataset.csv")  # Converto i file rtl in csv
     df = pd.read_csv(file_path)  # Creo un dataframe con pandas
     df['date'] = pd.to_datetime(df['date'], format='%d-%m-%Y')  # Converto la data nel formato corretto
     df['day'] = df.date.dt.day.astype(str)  # Aggiungo l'informazione relativa al giorno
@@ -64,6 +66,9 @@ def prepare_dataset(file_path: str) -> DataFrame: # Leggo il contenuto del file 
     df['year'] = df.date.dt.year.astype(str)  # Aggiungo l'informazione relativa all'anno
     df['time_idx'] = df.groupby(['month']).cumcount()  # Aggiungo una colonna per il time index per il TFT raggruppando per il mese
     df['date'] = df['date'].dt.date  # Tronco la data per evitare problemi di visualizzazione
+    df.set_index(['date'], inplace=True)
+    df.sort_index(inplace=True)
+    print(df)
     return df
 
 def show_dataset(df: DataFrame, target: str, title: str): # Visualizzo il dataset
@@ -79,11 +84,55 @@ def show_dataset(df: DataFrame, target: str, title: str): # Visualizzo il datase
     plt.tight_layout()
     plt.show()
 
-def apply_median_filter(df: DataFrame, kernel_size: int): # Applico un filtro mediano ai dati per ridurre il rumore
+def apply_median_filter(df: DataFrame, kernel_size: int = 15): # Applico un filtro mediano ai dati per ridurre il rumore
     assert kernel_size % 2 != 0, "Il kernel_size deve essere un numero dispari."
     df['east'] = medfilt(df['east'], kernel_size=kernel_size)
     df['north'] = medfilt(df['north'], kernel_size=kernel_size)
     df['height'] = medfilt(df['height'], kernel_size=kernel_size)
+
+def show_rolling_statistics(df: DataFrame, target: str, window: int = 12): # Mostro le statistiche dei dati
+    rolling_mean = df[target].rolling(window=window, min_periods=1).mean()
+    rolling_std = df[target].rolling(window=window, min_periods=1).std()
+    plt.figure(figsize=(10, 6))
+    plt.plot(df[target], color='cornflowerblue', label=target)
+    plt.plot(rolling_mean, color='firebrick', label='Rolling Mean')
+    plt.plot(rolling_std, color='limegreen', label='Rolling Std')
+    plt.xlabel('Date', size=12)
+    plt.ylabel(target, size=12)
+    plt.legend(loc='best')
+    plt.title('Rolling Statistics (' + target + ')', size=14)
+    plt.show()
+    test_stationary(df=df, target=target, window=window)
+
+def test_stationary(df: DataFrame, target: str, window: int = 12): # Controllo la stazionarità dei dati
+    movingAverage = df[target].rolling(window=window, min_periods=1).mean()
+    movingSTD = df[target].rolling(window=window, min_periods=1).std()
+    plt.figure(figsize=(10, 6))
+    plt.plot(df[target], color='blue', label=target)
+    plt.plot(movingAverage, color='red', label='Rolling Mean')
+    plt.plot(movingSTD, color='black', label='Rolling Std')
+    plt.legend(loc='best')
+    plt.title('Rolling Mean & Standard Deviation (' + target + ')', size=14)
+    plt.show(block=False)
+    print('Results of Dickey Fuller Test:')
+    dftest = adfuller(df[target], autolag='AIC')
+    dfoutput = pd.Series(dftest[0:4], index=['Test Statistic', 'p-value', 'No. of Lags used', 'Number of observations used'])
+    for key, value in dftest[4].items():
+        dfoutput['Critical Value (%s)' % key] = value
+    print(dfoutput)
+
+def save_results(model, results, target: str): # Salvo le predizioni e il confronto con i valori effettivi su file
+    results_vs_actuals = model.calculate_prediction_actual_by_variable(results.x, results.output)
+    values_actual = results_vs_actuals["average"]["actual"][target].cpu()
+    values_prediction = results_vs_actuals["average"]["prediction"][target].cpu()
+    values_actual = values_actual[values_actual != 0]
+    values_prediction = values_prediction[values_prediction != 0]
+    predictions_dataframe = pd.DataFrame({
+        "Valori Effettivi " + "(" + target + ")": values_actual,
+        "Valori Predetti " + "(" + target + ")": values_prediction
+    })
+    predictions_dataframe.to_csv("Predizioni_" + target + ".csv", index=True)
+    print(tabulate(predictions_dataframe, headers='keys', tablefmt='fancy_grid'))
 
 if __name__ == '__main__':
     """-------------------------------------------------------------------------------------------------
@@ -102,11 +151,23 @@ if __name__ == '__main__':
     settimana di osservazioni a partire da tre settimane.
     -------------------------------------------------------------------------------------------------"""
     # Caricamento e settaggio del dataset
-    rtl_to_csv("STRZ-LICO", "STRZ-LICO_Dataset.csv") # Converto i file rtl in csv
-    dataset = prepare_dataset("STRZ-LICO_Dataset.csv") # Leggo il file csv e carico il contenuto in un dataframe pandas
-    # show_dataset(dataset, 'height', 'Dataset') # Mostro un grafico per visualizzare il dataset originale
+    dataset = prepare_dataset("SOLO-LICO_Dataset.csv") # Leggo il file csv e carico il contenuto in un dataframe pandas
+
+    # Dataset originale
+    show_dataset(dataset, 'east', 'Dataset') # Mostro un grafico per visualizzare il dataset originale
+    show_dataset(dataset, 'north', 'Dataset') # Mostro un grafico per visualizzare il dataset originale
+    show_dataset(dataset, 'height', 'Dataset') # Mostro un grafico per visualizzare il dataset originale
+
+    # Dataset post filtragio mediano
     apply_median_filter(dataset, kernel_size=15)  # Filtro i dati con un filtro mediano per ridurre il rumore
-    # show_dataset(dataset, 'height', 'Dataset filtrato') # Mostro un grafico per visualizzare il dataset post filtraggio
+    show_dataset(dataset, 'east', 'Dataset filtrato') # Mostro un grafico per visualizzare il dataset post filtraggio
+    show_dataset(dataset, 'north', 'Dataset filtrato') # Mostro un grafico per visualizzare il dataset post filtraggio
+    show_dataset(dataset, 'height', 'Dataset filtrato') # Mostro un grafico per visualizzare il dataset post filtraggio
+
+    # Controllo della stazionarità
+    show_rolling_statistics(df=dataset, target='east', window=12)
+    show_rolling_statistics(df=dataset, target='north', window=12)
+    show_rolling_statistics(df=dataset, target='height', window=12)
 
     # Divisione dataset in train e validation
     train_cnt = int(len(dataset) * .8)  # Divido il dataset in 80% train e 20% test
@@ -115,21 +176,21 @@ if __name__ == '__main__':
     max_prediction_length = 168 # Numero di osservazioni da predire
     max_encoder_length = 504 # Numero di osservazioni da analizzare per le predizioni
     batch_size = 64
-    epochs = 10 # Numero di epoche
+    epochs = 30 # Numero di epoche
 
     # Costruzione del dataset nel formato richiesto dal Temporal Fusion Transformer
     training = TimeSeriesDataSet( # Converto il dataset nel formato richiesto dal TFT
         train, # Dati di addestramento
         time_idx='time_idx', # Indice temporale per le serie temporali
-        target='height', # Valore da predire
+        target='north', # Valore da predire
         group_ids=['month'], # Campo utilizzato per identificare univocamente le serie temporali
         min_encoder_length=max_encoder_length // 2, # Numero minimo di osservazioni da analizzare per le predizioni
         max_encoder_length=max_encoder_length, # Numero di osservazioni da analizzare per le predizioni
         min_prediction_length=1, # Numero minimo di osservazioni da predire
         max_prediction_length=max_prediction_length, # Numero di osservazioni da predire
         static_categoricals=['ID'], # Parametri categorici statici
-        time_varying_known_reals=['time_idx', 'east', 'north', 'day', 'year'], # Parametri che variano nel tempo e di cui si conosce il valore futuro
-        time_varying_unknown_reals=['height'], # Parametri che variano nel tempo e di cui non si conosce il valore futuro
+        time_varying_known_reals=['time_idx', 'east', 'height', 'day', 'year'], # Parametri che variano nel tempo e di cui si conosce il valore futuro
+        time_varying_unknown_reals=['north'], # Parametri che variano nel tempo e di cui non si conosce il valore futuro
         target_normalizer=GroupNormalizer( # Normalizzazione dei parametri
             groups=['month'],
             transformation="softplus"
@@ -145,25 +206,12 @@ if __name__ == '__main__':
     train_dataloader = training.to_dataloader(train=True, batch_size=batch_size, num_workers=8, persistent_workers=True)
     val_dataloader = validation.to_dataloader(train=False, batch_size=batch_size * 10, num_workers=8, persistent_workers=True)
 
-    '''
-    # Visualizzazione contenuto dei dataloader
-    print("Train DataLoader:")
-    for batch in enumerate(train_dataloader):
-        print(batch)
-        break
-    print("\nValidation DataLoader:")
-    for batch in enumerate(val_dataloader):
-        print(batch)
-        break
-    '''
-
     """-------------------------------------------------------------------------------------------------
     Le seguenti istruzioni hanno l'obiettivo di analizzare il dataset e il modello da utilizzare
     per determinare il valore di learning rate ottimale da utilizzare per la fase di training.
     Una volta trovato il valore, lo si memorizza ed è possibile visualizzarne il grafico.
     Il valore è cercato nell'intervallo [0.01, 0.0001] consigliato nel paper di riferimento del TFT.
     -------------------------------------------------------------------------------------------------"""
-    '''
     # Fase di ricerca del miglior learning rate con Tuner
     pl.seed_everything(42)
     trainer = pl.Trainer(
@@ -293,11 +341,10 @@ if __name__ == '__main__':
     best_tft = TemporalFusionTransformer.load_from_checkpoint(best_model_path)
 
     # Salvo il modello ottimale
-    torch.save(best_tft, "Migliori_Modelli/Romeo_Best_TFT_Height.pth")
-    '''
+    torch.save(best_tft, "Migliori_Modelli/Romeo_Best_TFT_North.pth")
 
     # Carico il miglior modello e lo metto in fase di validazione
-    best_tft = torch.load("Migliori_Modelli/Romeo_Best_TFT_Height.pth")
+    best_tft = torch.load("Migliori_Modelli/Romeo_Best_TFT_North.pth")
     best_tft.eval()
     """-------------------------------------------------------------------------------------------------
     La seguente parte di codice mette in evidenza la fase di validazione del modello.
@@ -312,31 +359,17 @@ if __name__ == '__main__':
         best_tft.plot_prediction(predictions.x, predictions.output, idx=idx, add_loss_to_title=True)
     plt.show()
 
-    '''
     # Stampa delle interpretazioni (importanza e attenzione)
     interpretation = best_tft.interpret_output(predictions.output, reduction="sum")
     best_tft.plot_interpretation(interpretation)
     plt.show()
-    '''
 
-    '''
     # Stampa del confronto predizioni-valori effettivi
     predictions = best_tft.predict(val_dataloader, return_x=True)
     predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output, normalize=False)
     best_tft.plot_prediction_actual_by_variable(predictions_vs_actuals)
     plt.show()
-    '''
 
-    '''
-    predictions_vs_actuals = best_tft.calculate_prediction_actual_by_variable(predictions.x, predictions.output)
-    values_actual = predictions_vs_actuals["average"]["actual"]["height"].cpu()
-    values_prediction = predictions_vs_actuals["average"]["prediction"]["height"].cpu()
-    values_actual = values_actual[values_actual != 0]
-    values_prediction = values_prediction[values_prediction != 0]
-    predictions_dataframe = pd.DataFrame({
-        "Valori Effettivi (Height)": values_actual,
-        "Predizioni (Height)": values_prediction
-    })
-    predictions_dataframe.to_csv("Predizioni_Height.csv", index=True)
-    print(tabulate(predictions_dataframe, headers='keys', tablefmt='fancy_grid'))
-    '''
+    # Salvataggio dei risultati su file csv
+    predictions = best_tft.predict(val_dataloader, return_x=True)
+    save_results(best_tft, predictions, "north")
