@@ -137,6 +137,7 @@ if __name__ == '__main__':
     Come prima cosa, utilizzo la funzione definita per convertire i file rtl in un unico file csv
     contenente i campi ID, ora, data e target.
     Fatto ciò, utilizzo pandas per salvare tutti i dati in un dataframe.
+    Siccome i dati presentano rumore, applico un filtro mediano per ridurlo.
     Successivamente costruisco un campo descrittivo per indicare il mese di ogni osservazione da
     utilizzare per raggruppare i dati.
     Il campo "time_idx", che consiste in un identificativo progressivo per ogni osservazione,
