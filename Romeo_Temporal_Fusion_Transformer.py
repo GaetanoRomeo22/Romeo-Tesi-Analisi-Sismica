@@ -66,14 +66,12 @@ def prepare_dataset(file_path: str) -> DataFrame: # Leggo il contenuto del file 
     df['year'] = df.date.dt.year.astype(str)  # Aggiungo l'informazione relativa all'anno
     df['time_idx'] = df.groupby(['month']).cumcount()  # Aggiungo una colonna per il time index per il TFT raggruppando per il mese
     df['date'] = df['date'].dt.date  # Tronco la data per evitare problemi di visualizzazione
-    df.set_index(['date'], inplace=True)
-    df.sort_index(inplace=True)
     print(df)
     return df
 
 def show_dataset(df: DataFrame, target: str, title: str): # Visualizzo il dataset
     plt.figure(figsize=(10, 6))
-    plt.scatter(dataset['date'], df[target], color='blue', alpha=0.5, label=target)
+    plt.scatter(df['date'], df[target], color='blue', alpha=0.5, label=target)
     plt.title(title, fontsize=16)
     plt.xlabel('Data', fontsize=14)
     plt.ylabel(target, fontsize=14)
