@@ -43,7 +43,7 @@ Le osservazioni inerenti a marzo 2022 e gennaio 2023 sono state ignorate in quan
 def rtl_to_csv(folder_path: str, output_file: str):  # Converto il contenuto dei file rtl in un unico csv
     with open(output_file, mode='w', newline='') as csv_file:  # Apro il file di output in scrittura
         csv_writer = csv.writer(csv_file, delimiter=',')  # csv_writer per scrivere sul file
-        csv_writer.writerow(['ID', 'date', 'east', 'north', 'height'])  # Scrivo i nomi dei campi da salvare
+        csv_writer.writerow(['date', 'east', 'north', 'height'])  # Scrivo i nomi dei campi da salvare
         for file in os.listdir(folder_path):  # Elenco tutti i file della directory
             file_path = os.path.join(folder_path, file)  # Ottengo il path del file
             with open(file_path, mode='r') as rtl_file:  # Apro il file rtl in lettura
@@ -55,7 +55,7 @@ def rtl_to_csv(folder_path: str, output_file: str):  # Converto il contenuto dei
                     east = modf(float(file_data[3]))[0] # Estraggo la parte frazionaria del campo East
                     north = modf(float(file_data[5]))[0] # Estraggo la parte frazionaria del campo North
                     height = modf(float(file_data[10]))[0] # Estraggo la parte frazionaria del campo Height
-                    csv_writer.writerow(['$GPLLQ', date.strftime('%d-%m-%Y'), east, north, height]) # Scrivo i dati su file
+                    csv_writer.writerow([date.strftime('%d-%m-%Y'), east, north, height]) # Scrivo i dati su file
 
 def prepare_dataset(file_path: str) -> DataFrame: # Leggo il contenuto del file csv
     rtl_to_csv("SOLO-LICO", "SOLO-LICO_Dataset.csv")  # Converto i file rtl in csv
@@ -82,36 +82,43 @@ def show_dataset(df: DataFrame, target: str, title: str): # Visualizzo il datase
     plt.tight_layout()
     plt.show()
 
+"""-------------------------------------------------------------------------------------------------
+Le osservazioni presentano rumore (errori di misurazione rilevabili graficamente come picchi).
+Motivo per il quale è buona norma applicare un filtro.
+In questo caso è applicato un filtro mediano.
+-------------------------------------------------------------------------------------------------"""
 def apply_median_filter(df: DataFrame, kernel_size: int = 15): # Applico un filtro mediano ai dati per ridurre il rumore
     assert kernel_size % 2 != 0, "Il kernel_size deve essere un numero dispari."
     df['east'] = medfilt(df['east'], kernel_size=kernel_size)
     df['north'] = medfilt(df['north'], kernel_size=kernel_size)
     df['height'] = medfilt(df['height'], kernel_size=kernel_size)
 
-def show_rolling_statistics(df: DataFrame, target: str, window: int = 12): # Mostro le statistiche dei dati
-    rolling_mean = df[target].rolling(window=window, min_periods=1).mean()
-    rolling_std = df[target].rolling(window=window, min_periods=1).std()
-    plt.figure(figsize=(10, 6))
-    plt.plot(df[target], color='cornflowerblue', label=target)
-    plt.plot(rolling_mean, color='firebrick', label='Rolling Mean')
-    plt.plot(rolling_std, color='limegreen', label='Rolling Std')
-    plt.xlabel('Date', size=12)
-    plt.ylabel(target, size=12)
-    plt.legend(loc='best')
-    plt.title('Rolling Statistics (' + target + ')', size=14)
+"""-------------------------------------------------------------------------------------------------
+Una serie temporale stazionaria è una serie le cui proprietà statistiche, quali media, varianza
+e correlazione, non dipendono dal tempo in cui la serie viene osservata.
+Quindi, serie temporali contenenti componenti tendenziali (trend), o stagionali, non sono stazionarie,
+in quanto questi fattori influenzano il valore della serie temporale in tempi diversi.
+Per alcuni modelli, la stazionarità è necessaria.
+-------------------------------------------------------------------------------------------------"""
+def show_rolling_statistics(df: DataFrame, window: int = 12):
+    targets = ['east', 'north', 'height']
+    fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(10, 18), sharex=True)
+    for i, target in enumerate(targets):
+        rolling_mean = df[target].rolling(window=window, min_periods=1).mean()
+        rolling_std = df[target].rolling(window=window, min_periods=1).std()
+        axes[i].plot(df[target], color='cornflowerblue', label=target)
+        axes[i].plot(rolling_mean, color='firebrick', label='Rolling Mean')
+        axes[i].plot(rolling_std, color='limegreen', label='Rolling Std')
+        axes[i].set_title(f'Rolling Statistics ({target})', size=14)
+        axes[i].set_xlabel('Date', size=12)
+        axes[i].set_ylabel(target, size=12)
+        axes[i].legend(loc='best')
+    plt.tight_layout()
     plt.show()
-    test_stationary(df=df, target=target, window=window)
+    for target in targets:
+        test_stationary(df=df, target=target)
 
-def test_stationary(df: DataFrame, target: str, window: int = 12): # Controllo la stazionarità dei dati
-    movingAverage = df[target].rolling(window=window, min_periods=1).mean()
-    movingSTD = df[target].rolling(window=window, min_periods=1).std()
-    plt.figure(figsize=(10, 6))
-    plt.plot(df[target], color='blue', label=target)
-    plt.plot(movingAverage, color='red', label='Rolling Mean')
-    plt.plot(movingSTD, color='black', label='Rolling Std')
-    plt.legend(loc='best')
-    plt.title('Rolling Mean & Standard Deviation (' + target + ')', size=14)
-    plt.show(block=False)
+def test_stationary(df: DataFrame, target: str): # Controllo la stazionarità dei dati
     print('Results of Dickey Fuller Test:')
     dftest = adfuller(df[target], autolag='AIC')
     dfoutput = pd.Series(dftest[0:4], index=['Test Statistic', 'p-value', 'No. of Lags used', 'Number of observations used'])
@@ -164,9 +171,7 @@ if __name__ == '__main__':
     show_dataset(dataset, 'height', 'Dataset filtrato') # Mostro un grafico per visualizzare il dataset post filtraggio
 
     # Controllo della stazionarità
-    show_rolling_statistics(df=dataset, target='east', window=12)
-    show_rolling_statistics(df=dataset, target='north', window=12)
-    show_rolling_statistics(df=dataset, target='height', window=12)
+    show_rolling_statistics(df=dataset, window=12)
 
     # Divisione dataset in train e validation
     train_cnt = int(len(dataset) * .8)  # Divido il dataset in 80% train e 20% test
@@ -187,7 +192,6 @@ if __name__ == '__main__':
         max_encoder_length=max_encoder_length, # Numero di osservazioni da analizzare per le predizioni
         min_prediction_length=1, # Numero minimo di osservazioni da predire
         max_prediction_length=max_prediction_length, # Numero di osservazioni da predire
-        static_categoricals=['ID'], # Parametri categorici statici
         time_varying_known_reals=['time_idx', 'east', 'height', 'day', 'year'], # Parametri che variano nel tempo e di cui si conosce il valore futuro
         time_varying_unknown_reals=['north'], # Parametri che variano nel tempo e di cui non si conosce il valore futuro
         target_normalizer=GroupNormalizer( # Normalizzazione dei parametri
